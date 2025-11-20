@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Molecule VR - Labels Added</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/webxr-polyfill@latest/build/webxr-polyfill.min.js"></script>
+    <script> const polyfill = new WebXRPolyfill(); </script>
+    <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-extras@7.4.0/dist/aframe-extras.min.js"></script>
+  </head>
+  
+  <body>
+    <script>
+      // --- COMPONENT 1: RIGHT STICK TURNING (Xbox Style) ---
+      // KEPT EXACTLY AS PROVIDED
+      AFRAME.registerComponent('gamepad-turn', {
+        schema: {
+            sensitivity: {default: 2.0}
+        },
+        tick: function (time, timeDelta) {
+            const gamepads = navigator.getGamepads();
+            if (!gamepads) return;
+
+            const gp = gamepads[0];
+            if (gp) {
+                const rightStickX = gp.axes[2];
+                if (Math.abs(rightStickX) > 0.1) {
+                    const rotation = this.el.getAttribute('rotation');
+                    rotation.y -= rightStickX * this.data.sensitivity * (timeDelta / 20); 
+                    this.el.setAttribute('rotation', rotation);
+                }
+            }
+        }
+      });
+
+      // --- COMPONENT 2: RAIL MOVEMENT (Left/Right Slide) ---
+      AFRAME.registerComponent('gamepad-rail', {
+        schema: {
+            speed: {default: 0.1},
+            fixedY: {default: 0}, 
+            fixedZ: {default: 2}  
+        },
+        tick: function (time, timeDelta) {
+            const gamepads = navigator.getGamepads();
+            if (!gamepads) return;
+            const gp = gamepads[0];
+            if (gp) {
+                const leftStickX = gp.axes[0];
+                if (Math.abs(leftStickX) > 0.1) {
+                    this.el.object3D.position.x += leftStickX * this.data.speed * (timeDelta / 20);
+                }
+                this.el.object3D.position.y = this.data.fixedY;
+                this.el.object3D.position.z = this.data.fixedZ;
+            }
+        }
+      });
+
+      // --- COMPONENT 3: INTERACTION (Grab/Drop with Reticle Color) ---
+      AFRAME.registerComponent('atom-grab', {
+        init: function () {
+          this.heldObject = null;
+          this.heldType = null; 
+          this.hoveredObject = null;
+          this.buttonPressed = false; 
+          
+          this.reticle = this.el;
+
+          this.onTrigger = this.onTrigger.bind(this);
+          this.onHover = this.onHover.bind(this);
+          this.onHoverClear = this.onHoverClear.bind(this);
+          
+          this.el.addEventListener('raycaster-intersection', this.onHover);
+          this.el.addEventListener('raycaster-intersection-cleared', this.onHoverClear);
+          this.el.addEventListener('mousedown', this.onTrigger);
+
+          // Default Red
+          this.reticle.setAttribute('material', 'color', 'red');
+        },
+
+        tick: function () {
+            const gamepads = navigator.getGamepads();
+            if (gamepads) {
+                const gp = gamepads[0];
+                if (gp) {
+                    if (gp.buttons[0].pressed) {
+                        if (!this.buttonPressed) {
+                            this.onTrigger({ type: 'gamepad' });
+                            this.buttonPressed = true;
+                        }
+                    } else {
+                        this.buttonPressed = false;
+                    }
+                }
+            }
+        },
+
+        onHover: function (evt) {
+            const el = evt.detail.els[0]; 
+            if (this.hoveredObject === el) return; 
+            this.hoveredObject = el;
+
+            if (this.heldObject !== el) {
+                if (el.classList.contains('atom') || el.classList.contains('molecule-move')) {
+                    el.setAttribute('material', 'emissive', '#333333'); 
+                }
+            }
+        },
+
+        onHoverClear: function (evt) {
+            if (this.hoveredObject && this.hoveredObject !== this.heldObject) {
+                this.hoveredObject.setAttribute('material', 'emissive', '#000000');
+            }
+            this.hoveredObject = null;
+        },
+
+        onTrigger: function (evt) {
+          if (evt.type === 'mousedown' && evt.detail.source === 'hand') return;
+
+          if (this.heldObject) {
+            if (this.heldType === 'atom') {
+                this.dropAtom();
+            } else if (this.heldType === 'molecule') {
+                this.dropMolecule();
+            }
+          } else {
+            if (this.hoveredObject) {
+                if (this.hoveredObject.classList.contains('atom')) {
+                    this.grabAtom(this.hoveredObject);
+                } 
+                else if (this.hoveredObject.classList.contains('molecule-move')) {
+                    this.grabMolecule(this.hoveredObject.parentEl); 
+                }
+            }
+          }
+        },
+
+        grabMolecule: function (moleculeGroup) {
+            this.heldObject = moleculeGroup;
+            this.heldType = 'molecule';
+            this.el.object3D.attach(moleculeGroup.object3D);
+            this.reticle.setAttribute('material', 'color', 'green');
+        },
+
+        dropMolecule: function () {
+            if (!this.heldObject) return;
+            const moleculeGroup = this.heldObject;
+            const bonds = moleculeGroup.querySelectorAll('.molecule-move');
+            bonds.forEach(b => b.setAttribute('material', 'emissive', '#000000')); 
+            this.el.sceneEl.object3D.attach(moleculeGroup.object3D);
+            this.heldObject = null;
+            this.heldType = null;
+            this.reticle.setAttribute('material', 'color', 'red');
+        },
+
+        grabAtom: function (atom) {
+          this.heldObject = atom;
+          this.heldType = 'atom';
+          atom.setAttribute('material', 'emissive', '#000000');
+          this.el.object3D.attach(atom.object3D);
+          this.reticle.setAttribute('material', 'color', 'green');
+        },
+
+        dropAtom: function () {
+          if (!this.heldObject) return;
+          const atom = this.heldObject;
+          const moleculeGroup = document.querySelector('#molecule');
+          
+          if (moleculeGroup) {
+              const homeStr = atom.getAttribute('data-home-pos').split(' ');
+              const localHome = new THREE.Vector3(+homeStr[0], +homeStr[1], +homeStr[2]);
+              const worldHome = localHome.clone();
+              worldHome.applyMatrix4(moleculeGroup.object3D.matrixWorld);
+              const currentPos = new THREE.Vector3();
+              atom.object3D.getWorldPosition(currentPos);
+              const dist = currentPos.distanceTo(worldHome);
+
+              if (dist < 0.5) {
+                moleculeGroup.object3D.attach(atom.object3D);
+                atom.object3D.position.copy(localHome);
+                atom.object3D.rotation.set(0, 0, 0);
+              } else {
+                this.el.sceneEl.object3D.attach(atom.object3D);
+              }
+          } else {
+              this.el.sceneEl.object3D.attach(atom.object3D);
+          }
+
+          atom.setAttribute('material', 'emissive', '#000000');
+          this.heldObject = null;
+          this.heldType = null;
+          this.reticle.setAttribute('material', 'color', 'red');
+        }
+      });
+    </script>
+
+    <a-scene background="color: #111">
+      <a-assets>
+        </a-assets>
+
+      <a-entity id="rig" 
+                movement-controls="speed: 0.2; fly: false" 
+                gamepad-turn="sensitivity: 2.0"
+                position="0 0 2">
+        
+        <a-entity camera position="0 1.6 0" look-controls="pointerLockEnabled: false">
+          <a-entity cursor="fuse: false"
+                    raycaster="objects: .atom, .molecule-move; far: 10"
+                    position="0 0 -1"
+                    geometry="primitive: ring; radiusInner: 0.02; radiusOuter: 0.03"
+                    material="color: red; shader: flat"
+                    atom-grab> 
+                    <a-animation attribute="scale" begin="mouseenter" end="mouseleave" to="1.5 1.5 1.5"></a-animation>
+          </a-entity>
+        </a-entity>
+      </a-entity>
+
+      <a-entity id="molecule" position="0 1.5 -2">
+        
+        <a-sphere class="atom" color="red" radius="0.3" position="0 0 0" 
+                  data-home-pos="0 0 0" shadow>
+            <a-text value="O" color="black" align="center" 
+                    position="0 0 0.32" scale="1.5 1.5 1.5"></a-text>
+        </a-sphere>
+        
+        <a-sphere class="atom" color="white" radius="0.2" position="-0.5 -0.4 0" 
+                  data-home-pos="-0.5 -0.4 0" shadow>
+            <a-text value="H" color="black" align="center" 
+                    position="0 0 0.22" scale="1.2 1.2 1.2"></a-text>
+        </a-sphere>
+
+        <a-sphere class="atom" color="white" radius="0.2" position="0.5 -0.4 0" 
+                  data-home-pos="0.5 -0.4 0" shadow>
+            <a-text value="H" color="black" align="center" 
+                    position="0 0 0.22" scale="1.2 1.2 1.2"></a-text>
+        </a-sphere>
+
+        <a-cylinder class="molecule-move" color="#888" height="0.6" radius="0.05" 
+                    position="-0.25 -0.2 0" rotation="0 0 -50"></a-cylinder>
+        <a-cylinder class="molecule-move" color="#888" height="0.6" radius="0.05" 
+                    position="0.25 -0.2 0" rotation="0 0 50"></a-cylinder>
+      </a-entity>
+
+      <a-sky src="#sky" rotation="0 -130 0"></a-sky>
+      <a-plane rotation="-90 0 0" width="30" height="30" color="#222" position="0 0 0"></a-plane>
+      <a-light type="ambient" color="#BBB"></a-light>
+      <a-light type="directional" position="1 2 1" intensity="0.5" shadow-cast="true"></a-light>
+    </a-scene>
+  </body>
+</html>

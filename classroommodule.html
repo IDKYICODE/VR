@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>VR Classroom - Voice Activated</title>
+    <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/webxr-polyfill@latest/build/webxr-polyfill.min.js"></script>
+    <script> const polyfill = new WebXRPolyfill(); </script>
+  </head>
+
+  <body>
+    <script>
+      // --- COMPONENT: GAMEPAD CLICKER ---
+      AFRAME.registerComponent('gamepad-clicker', {
+        init: function () {
+          this.buttonPressed = false;
+          this.cursor = document.querySelector('a-cursor'); 
+        },
+        tick: function () {
+          const gamepads = navigator.getGamepads();
+          if (!gamepads) return;
+          const gp = gamepads[0];
+          if (gp) {
+            if (gp.buttons[0].pressed) {
+              if (!this.buttonPressed) {
+                this.clickIntersected();
+                this.buttonPressed = true;
+              }
+            } else {
+              this.buttonPressed = false; 
+            }
+          }
+        },
+        clickIntersected: function () {
+           if (!this.cursor) return;
+           const raycaster = this.cursor.components.raycaster;
+           const intersected = raycaster.intersectedEls;
+           if (intersected.length > 0) {
+             intersected[0].emit('click');
+           }
+        }
+      });
+
+      // --- COMPONENT: CLASSROOM MANAGER ---
+      AFRAME.registerComponent('classroom-manager', {
+        schema: {
+          lessonData: {default: []}
+        },
+
+        init: function () {
+          this.stepIndex = -1;
+          this.blackboardText = document.querySelector('#board-text');
+          this.synth = window.speechSynthesis;
+          this.isListeningForDoubt = false; // State flag
+          
+          // --- 1. QUERY RECOGNITION (For the actual question) ---
+          const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+          if (SpeechRecognition) {
+            this.recognition = new SpeechRecognition();
+            this.recognition.lang = 'en-US';
+            this.recognition.continuous = false;
+
+            this.recognition.onresult = (event) => {
+              const transcript = event.results[0][0].transcript;
+              this.handleStudentQuestion(transcript);
+            };
+            
+            this.recognition.onerror = (event) => {
+                console.error("Query Speech Error:", event.error);
+                // If error, go back to keyword listening
+                this.speak("I didn't catch that.");
+            };
+
+            // --- 2. KEYWORD SPOTTER (Listens for "DOUBT") ---
+            this.keywordSpotter = new SpeechRecognition();
+            this.keywordSpotter.lang = 'en-US';
+            this.keywordSpotter.continuous = true; 
+            this.keywordSpotter.interimResults = true; // Fast detection
+
+            this.keywordSpotter.onresult = (event) => {
+                // Loop through results to find the trigger word
+                for (let i = event.resultIndex; i < event.results.length; ++i) {
+                    const transcript = event.results[i][0].transcript.toLowerCase();
+                    console.log("Heard:", transcript);
+                    
+                    if (transcript.includes("doubt")) {
+                        console.log("TRIGGER WORD DETECTED!");
+                        this.keywordSpotter.stop(); // Stop spotting
+                        this.startListening(); // Start asking
+                        return;
+                    }
+                }
+            };
+
+            this.keywordSpotter.onend = () => {
+                // Auto-restart keyword spotter if we are NOT currently asking a question
+                if (this.isListeningForDoubt) {
+                    try { this.keywordSpotter.start(); } catch(e){}
+                }
+            };
+
+            // Start listening for "Doubt" immediately
+            this.startKeywordListener();
+
+          } else {
+            console.warn("Web Speech API not supported.");
+            this.blackboardText.setAttribute('value', "Error:\nBrowser does not support\nSpeech Recognition.");
+          }
+
+          this.lesson = [
+            {
+              board: "Welcome to Chemistry 101\n\nClick 'Next' to start.",
+              speech: "Hello student! Welcome to VR Chemistry. Today we will learn about Water."
+            },
+            {
+              board: "Topic: Water (H2O)\n\n- 2 Hydrogen Atoms\n- 1 Oxygen Atom",
+              speech: "Let's talk about Water. It is chemically known as H-2-O. This means it is made of two hydrogen atoms and one oxygen atom."
+            },
+            {
+              board: "The Bond\n\nCovalent Bond\n(Sharing Electrons)",
+              speech: "These atoms are held together by something called a Covalent Bond. This means they share electrons to stay stable."
+            },
+            {
+              board: "Lesson Complete!\n\nLook at the molecule\non your left.",
+              speech: "That concludes our intro. Please rotate your head to the left to interact with the model you built earlier. Class dismissed!"
+            }
+          ];
+
+          document.querySelector('#next-btn').addEventListener('click', () => this.nextSlide());
+          document.querySelector('#doubt-btn').addEventListener('click', () => this.startListening());
+        },
+
+        // Helper to turn ON keyword listening
+        startKeywordListener: function() {
+            this.isListeningForDoubt = true;
+            try { this.keywordSpotter.start(); } catch(e) {}
+            console.log("Listening for 'DOUBT'...");
+        },
+
+        // Helper to turn OFF keyword listening (when asking/speaking)
+        stopKeywordListener: function() {
+            this.isListeningForDoubt = false;
+            try { this.keywordSpotter.stop(); } catch(e) {}
+        },
+
+        nextSlide: function () {
+          this.stepIndex++;
+          if (this.stepIndex < this.lesson.length) {
+            const slide = this.lesson[this.stepIndex];
+            this.blackboardText.setAttribute('value', slide.board);
+            this.speak(slide.speech);
+          } else {
+            this.stepIndex = -1;
+            this.nextSlide();
+          }
+        },
+
+        startListening: function() {
+            // 1. Stop everything else
+            this.synth.cancel();
+            this.stopKeywordListener(); // Stop listening for "Doubt" so it doesn't conflict
+
+            this.blackboardText.setAttribute('value', "Listening...\n(Speak your doubt now)");
+            
+            if (this.recognition) {
+                try {
+                    this.recognition.start();
+                } catch (e) {
+                    console.log("Recognition already active");
+                }
+            }
+        },
+
+        handleStudentQuestion: function(question) {
+            this.blackboardText.setAttribute('value', `You asked:\n"${question}"\n\nThinking...`);
+            
+            this.fetchLLMResponse(question).then(answer => {
+                this.blackboardText.setAttribute('value', `Answer:\n${answer}`);
+                this.speak(answer);
+            });
+        },
+
+        fetchLLMResponse: async function(question) {
+            console.log("Sending to Gemini:", question);
+            const apiKey = "AIzaSyC92gmFyarrO5GdFayzYmFF10Rkn-AvecE"; 
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+            try {
+                const response = await fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        contents: [{
+                            parts: [{
+                                text: `You are a helpful chemistry teacher explaining concepts simply to a student in VR. Keep answers short (max 2 sentences). The student asks: ${question}`
+                            }]
+                        }]
+                    })
+                });
+                
+                const data = await response.json();
+                if (!response.ok) return `Error: ${data.error?.message || response.statusText}`;
+
+                if (data.candidates && data.candidates.length > 0 && data.candidates[0].content) {
+                    return data.candidates[0].content.parts[0].text;
+                } else {
+                    return "I'm not sure how to answer that.";
+                }
+
+            } catch (error) {
+                return "Connection Error.";
+            }
+        },
+
+        speak: function (text) {
+          this.synth.cancel();
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.rate = 0.9; 
+          
+          // CRITICAL: When finished speaking, start listening for "Doubt" again
+          utterance.onend = () => {
+             console.log("Finished speaking. Resuming keyword listener.");
+             this.startKeywordListener();
+          };
+
+          this.synth.speak(utterance);
+        }
+      });
+    </script>
+
+    <a-scene background="color: #333">
+      <a-assets>
+        <img id="floor-tex" src="https://cdn.aframe.io/a-painter/images/floor.jpg" crossorigin="anonymous">
+      </a-assets>
+
+      <!-- ENVIRONMENT: Classroom Walls & Furniture -->
+      <a-plane src="#floor-tex" rotation="-90 0 0" width="20" height="20" repeat="10 10"></a-plane>
+      <a-plane color="#EEEEEE" rotation="90 0 0" position="0 4 0" width="20" height="20"></a-plane>
+      <a-plane color="#8B4513" position="0 2 -5" width="20" height="10"></a-plane> <!-- Front -->
+      <a-plane color="#A0522D" position="-5 2 0" rotation="0 90 0" width="20" height="10"></a-plane> <!-- Left -->
+      <a-plane color="#A0522D" position="5 2 0" rotation="0 -90 0" width="20" height="10"></a-plane> <!-- Right -->
+      <a-plane color="#8B4513" position="0 2 5" rotation="0 180 0" width="20" height="10"></a-plane> <!-- Back -->
+
+      <!-- Chairs (Rotated 180) -->
+      <a-entity position="-2 0 -2" rotation="0 180 0">
+        <a-box color="#654321" width="0.5" height="0.5" depth="0.5" position="0 0.25 0"></a-box>
+        <a-box color="#654321" width="0.5" height="0.5" depth="0.1" position="0 0.75 -0.2"></a-box>
+      </a-entity>
+      <a-entity position="-2 0 -3.5" rotation="0 180 0">
+        <a-box color="#654321" width="0.5" height="0.5" depth="0.5" position="0 0.25 0"></a-box>
+        <a-box color="#654321" width="0.5" height="0.5" depth="0.1" position="0 0.75 -0.2"></a-box>
+      </a-entity>
+      <a-entity position="2 0 -2" rotation="0 180 0">
+        <a-box color="#654321" width="0.5" height="0.5" depth="0.5" position="0 0.25 0"></a-box>
+        <a-box color="#654321" width="0.5" height="0.5" depth="0.1" position="0 0.75 -0.2"></a-box>
+      </a-entity>
+       <a-entity position="2 0 -3.5" rotation="0 180 0">
+        <a-box color="#654321" width="0.5" height="0.5" depth="0.5" position="0 0.25 0"></a-box>
+        <a-box color="#654321" width="0.5" height="0.5" depth="0.1" position="0 0.75 -0.2"></a-box>
+      </a-entity>
+
+      <!-- Student Desk -->
+      <a-box color="#8B4513" width="1.5" height="0.1" depth="0.5" position="0 0.8 -1.5"></a-box>
+      <a-box color="#654321" width="0.1" height="0.8" depth="0.1" position="-0.7 0.4 -1.5"></a-box>
+      <a-box color="#654321" width="0.1" height="0.8" depth="0.1" position="0.7 0.4 -1.5"></a-box>
+
+      <!-- BLACKBOARD -->
+      <a-entity position="0 2 -4.9">
+        <a-box color="#5C4033" width="4.2" height="2.2" depth="0.1"></a-box>
+        <a-plane color="#223322" width="4" height="2" position="0 0 0.06">
+          <a-text id="board-text" 
+                  value="Welcome to Class" 
+                  align="center" width="3.8" position="0 0 0.01" color="white">
+          </a-text>
+        </a-plane>
+      </a-entity>
+
+      <!-- UI PODIUM -->
+      <a-entity position="0 1 -2">
+        <a-box color="#444" width="0.8" height="1" depth="0.5" position="0 -0.5 0"></a-box>
+        <a-box id="next-btn" class="clickable" color="green" width="0.25" height="0.1" depth="0.25" position="0.2 0.05 0"
+               animation__click="property: position; from: 0.2 0.05 0; to: 0.2 0.02 0; startEvents: click; dur: 100; dir: alternate">
+            <a-text value="NEXT" align="center" rotation="-90 0 0" position="0 0.06 0" scale="0.5 0.5 0.5" color="white"></a-text>
+        </a-box>
+
+        <a-box id="doubt-btn" class="clickable" color="#CC0000" width="0.25" height="0.1" depth="0.25" position="-0.2 0.05 0"
+               animation__click="property: position; from: -0.2 0.05 0; to: -0.2 0.02 0; startEvents: click; dur: 100; dir: alternate">
+            <a-text value="ASK" align="center" rotation="-90 0 0" position="0 0.06 0" scale="0.5 0.5 0.5" color="white"></a-text>
+        </a-box>
+      </a-entity>
+
+      <a-entity id="rig" position="0 0 2" classroom-manager gamepad-clicker>
+        <a-camera>
+          <a-cursor fuse="true" fuse-timeout="1500" color="yellow" raycaster="objects: .clickable"></a-cursor>
+        </a-camera>
+        <a-entity laser-controls="hand: right" raycaster="objects: .clickable; far: 5"></a-entity>
+      </a-entity>
+
+      <a-light type="ambient" color="#888"></a-light>
+      <a-light type="point" position="0 3 0" intensity="0.8" castShadow="true"></a-light>
+
+    </a-scene>
+  </body>
+</html>
